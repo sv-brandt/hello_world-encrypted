@@ -1,0 +1,18 @@
+
+# ESP-IDF spezifisch
+build/
+sdkconfig.old
+managed_components/
+
+# PlatformIO Altlasten (falls vorhanden)
+.pio/
+
+# Editor & IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.claude/
+
+# Sicherheit & Lokale Konfiguration
+sdkconfig
