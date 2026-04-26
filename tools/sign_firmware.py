@@ -5,45 +5,38 @@ import sys
 try:
     import cryptography
 except ImportError:
-    print("[OTA SIGN] 'cryptography' fehlt. Installiere Paket in PIO-Umgebung...")
     env.Execute("$PYTHONEXE -m pip install cryptography")
 
 def sign_firmware(source, target, env):
     firmware_path = str(target[0])
-    sig_path = firmware_path + ".sig"
+    signed_path = firmware_path.replace(".bin", "-signed.bin")
     project_dir = env.subst("$PROJECT_DIR")
     key_path = os.path.join(project_dir, "signing_key.pem")
 
     if not os.path.isfile(key_path):
-        print("[OTA SIGN] signing_key.pem nicht gefunden – Firmware NICHT signiert.")
-        print("           -> python tools/gen_signing_key.py ausfuehren")
+        print("[OTA SIGN] signing_key.pem nicht gefunden.")
         return
 
-    try:
-        from cryptography.hazmat.primitives import hashes, serialization
-        from cryptography.hazmat.primitives.asymmetric import ec, rsa, padding as asym_padding
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
 
-        with open(key_path, "rb") as f:
-            priv = serialization.load_pem_private_key(f.read(), password=None)
+    with open(key_path, "rb") as f:
+        priv = serialization.load_pem_private_key(f.read(), password=None)
 
-        with open(firmware_path, "rb") as f:
-            firmware_data = f.read()
+    with open(firmware_path, "rb") as f:
+        firmware_data = f.read()
 
-        if isinstance(priv, rsa.RSAPrivateKey):
-            # RSA-PKCS1v15 (Secure Boot v2 RSA-Scheme)
-            signature = priv.sign(firmware_data, asym_padding.PKCS1v15(), hashes.SHA256())
-        else:
-            # ECDSA-P256 ueber SHA-256, DER-kodierte Ausgabe
-            signature = priv.sign(firmware_data, ec.ECDSA(hashes.SHA256()))
+    # ECDSA-P256 Signatur erstellen
+    signature = priv.sign(firmware_data, ec.ECDSA(hashes.SHA256()))
 
-        with open(sig_path, "wb") as f:
-            f.write(signature)
+    # Auf exakt 256 Bytes auffuellen (Padding)
+    padded_signature = signature.ljust(256, b'\x00')
 
-        print(f"[OTA SIGN] {os.path.basename(sig_path)} ({len(signature)} Bytes) erstellt")
+    # Firmware + Signatur-Block in eine Datei schreiben
+    with open(signed_path, "wb") as f:
+        f.write(firmware_data)
+        f.write(padded_signature)
 
-    except Exception as e:
-        print(f"[OTA SIGN] FEHLER: {e}")
-        sys.exit(1)
-
+    print(f"[OTA SIGN] Appended Signature erstellt (256 Bytes Block angehaengt): {os.path.basename(signed_path)}")
 
 env.AddPostAction("$BUILD_DIR/${PROGNAME}.bin", sign_firmware)
