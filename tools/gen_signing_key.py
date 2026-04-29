@@ -1,71 +1,43 @@
 #!/usr/bin/env python3
 """
 Einmalig aufrufen: python tools/gen_signing_key.py
-Erzeugt signing_key.pem (Secure Boot v2 kompatibel via espsecure.py)
-und schreibt den oeffentlichen Schluessel nach include/ota_signing_key.h.
-signing_key.pem NIEMALS einchecken!
+
+Erzeugt:
+  signing_key.pem         — privater ECDSA-P256 Schluessel (NICHT in Git!)
+  signing_key_digest.bin  — 32-Byte Public-Key-Digest (fuer eFuse, Produktion)
+
+WICHTIG: signing_key.pem ist der einzige Vertrauensanker. Backupen.
+
+Hinweis fuer Software-SBv2: Anker zur Laufzeit ist der PubKey, der im
+Sig-Block der bereits laufenden App steht — kein separater Header noetig.
+Beim ersten Flash via Kabel wird die App mit dem Sig-Block geflasht und
+"impft" sich damit selbst. Spaeter pruefen alle OTAs gegen diesen PubKey.
 """
 import os
-import sys
 import subprocess
+import sys
 
-KEY_PATH = "signing_key.pem"
-HEADER_PATH = os.path.join("include", "ota_signing_key.h")
-
-
-def main():
-    if os.path.exists(KEY_PATH):
-        print(f"FEHLER: {KEY_PATH} existiert bereits. Loeschen falls Neugenerierung gewuenscht.")
-        sys.exit(1)
-
-    # Schluessel generieren – espsecure.py bevorzugt (Secure Boot v2 Format)
-    try:
-        subprocess.run(
-            ["espsecure.py", "generate_signing_key",
-             "--version", "2", "--scheme", "ecdsa256", KEY_PATH],
-            check=True
-        )
-        print(f"Schluessel via espsecure.py erstellt: {KEY_PATH}")
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        # Fallback: cryptography-Bibliothek (in PlatformIO-Python enthalten)
-        from cryptography.hazmat.primitives.asymmetric import ec
-        from cryptography.hazmat.primitives import serialization
-        priv = ec.generate_private_key(ec.SECP256R1())
-        with open(KEY_PATH, "wb") as f:
-            f.write(priv.private_bytes(
-                serialization.Encoding.PEM,
-                serialization.PrivateFormat.TraditionalOpenSSL,
-                serialization.NoEncryption(),
-            ))
-        print(f"Schluessel via cryptography-Lib erstellt: {KEY_PATH}")
-
-    # Oeffentlichen Schluessel als DER extrahieren
-    from cryptography.hazmat.primitives import serialization
-    with open(KEY_PATH, "rb") as f:
-        priv = serialization.load_pem_private_key(f.read(), password=None)
-    pub_der = priv.public_key().public_bytes(
-        serialization.Encoding.DER,
-        serialization.PublicFormat.SubjectPublicKeyInfo,
-    )
-
-    # Header schreiben
-    hex_bytes = ", ".join(f"0x{b:02x}" for b in pub_der)
-    header = (
-        "#pragma once\n"
-        "#include <stdint.h>\n\n"
-        "// OTA-Signaturschluessel (ECDSA-P256, DER-kodiert, SubjectPublicKeyInfo)\n"
-        "// Generiert mit: python tools/gen_signing_key.py\n"
-        f"static const uint8_t OTA_PUBLIC_KEY_DER[{len(pub_der)}] = {{\n"
-        f"    {hex_bytes}\n"
-        "};\n"
-        f"static const size_t OTA_PUBLIC_KEY_DER_LEN = {len(pub_der)};\n"
-    )
-    with open(HEADER_PATH, "w") as f:
-        f.write(header)
-
-    print(f"Oeffentlicher Schluessel ({len(pub_der)} Bytes) -> {HEADER_PATH}")
-    print(f"WICHTIG: {KEY_PATH} ist in .gitignore – niemals einchecken!")
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+KEY = os.path.join(PROJECT_ROOT, "signing_key.pem")
+DIGEST = os.path.join(PROJECT_ROOT, "signing_key_digest.bin")
 
 
-if __name__ == "__main__":
-    main()
+if os.path.exists(KEY):
+    print(f"FEHLER: {KEY} existiert bereits.")
+    print("Bewusst loeschen, falls neu generieren gewollt.")
+    print("ACHTUNG: Neuer Schluessel = alle bisher signierten Bins ungueltig.")
+    sys.exit(1)
+
+subprocess.run(["espsecure", "generate_signing_key", "--version", "2",
+                "--scheme", "ecdsa256", KEY], check=True)
+subprocess.run(["espsecure", "digest_sbv2_public_key",
+                "--keyfile", KEY, "--output", DIGEST], check=True)
+
+digest = open(DIGEST, "rb").read()
+if len(digest) != 32:
+    print(f"FEHLER: Digest hat {len(digest)} Bytes, erwartet 32.")
+    sys.exit(1)
+
+print(f"\nOK. Digest: {digest.hex()}")
+print(f"  {KEY}        -> JETZT BACKUPEN (mind. 2 sichere Orte)")
+print(f"  {DIGEST}     -> fuer spaetere eFuse-Brennung (Produktion)")
