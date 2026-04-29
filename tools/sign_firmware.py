@@ -1,3 +1,11 @@
+"""
+Post-Build Script: signiert firmware.bin per espsecure fuer Secure Boot v2.
+Originale Firmware wird in unsigned-firmware.bin umbenannt. 
+Signierte Firmware wird als firmware.bin gespeichert fuer Auto-Flash.
+
+Voraussetzung: signing_key.pem im Projekt-Root (via tools/gen_signing_key.py).
+und "pip install esptool"
+"""
 Import("env")
 import os
 import subprocess
@@ -5,78 +13,55 @@ import sys
 import importlib.util
 
 def check_and_install_esptool():
+    """Prüft, ob esptool installiert ist, und installiert es falls nötig."""
     if importlib.util.find_spec("esptool") is None:
         print("[PRE-BUILD] 'esptool' nicht gefunden. Installiere...")
         try:
             subprocess.check_call([sys.executable, "-m", "pip", "install", "esptool"])
+            print("[PRE-BUILD] Installation erfolgreich.")
         except Exception as e:
-            print(f"[PRE-BUILD] FEHLER: {e}")
+            print(f"[PRE-BUILD] FEHLER: Installation fehlgeschlagen: {e}")
             sys.exit(1)
 
+# Sofortige Prüfung beim Laden des Scripts
 check_and_install_esptool()
-
-def generate_ota_header(key_path, header_path):
-    """Extrahiert den Public Key und schreibt ihn in ota_signing_key.h"""
-    from cryptography.hazmat.primitives import serialization
-    
-    if not os.path.exists(key_path):
-        return # Key noch nicht da, Header-Erzeugung überspringen
-
-    with open(key_path, "rb") as f:
-        private_key = serialization.load_pem_private_key(f.read(), password=None)
-        public_key = private_key.public_key()
-        
-        # In DER-Format exportieren (SubjectPublicKeyInfo)
-        der_bytes = public_key.public_bytes(
-            encoding=serialization.Encoding.DER,
-            format=serialization.PublicFormat.SubjectPublicKeyInfo
-        )
-
-    # C-Header Inhalt erstellen
-    hex_values = ", ".join([f"0x{b:02x}" for b in der_bytes])
-    formatted_hex = "\n    ".join([hex_values[i:i+75] for i in range(0, len(hex_values), 75)])
-
-    header_content = f"""#pragma once
-#include <stdint.h>
-
-// OTA-Signaturschluessel (ECDSA-P256, DER-kodiert, SubjectPublicKeyInfo)
-// Automatisch generiert vom Post-Build Script
-static const uint8_t OTA_PUBLIC_KEY_DER[{len(der_bytes)}] = {{
-    {formatted_hex}
-}};
-static const size_t OTA_PUBLIC_KEY_DER_LEN = {len(der_bytes)};
-"""
-    
-    # NEU: Erstelle den Zielordner (z.B. 'include'), falls er nicht existiert
-    os.makedirs(os.path.dirname(header_path), exist_ok=True)
-    
-    with open(header_path, "w") as f:
-        f.write(header_content)
-    print(f"[PRE-BUILD] Header generiert: {header_path}")
 
 def sign_firmware_sbv2(source, target, env):
     firmware_path = str(target[0])
-    project_dir = env.subst("$PROJECT_DIR")
-    key_path = os.path.join(project_dir, "signing_key.pem")
-    header_path = os.path.join(project_dir, "include", "ota_signing_key.h")
+    if not firmware_path.endswith(".bin"):
+        print(f"[OTA SIGN] FEHLER: Pfad endet nicht auf .bin: {firmware_path}")
+        sys.exit(1)
+    
+    dir_name = os.path.dirname(firmware_path)
+    base_name = os.path.basename(firmware_path)
+    
+    # Pfad für die unsignierte Datei definieren
+    unsigned_path = os.path.join(dir_name, "unsigned-" + base_name)
+    key_path = os.path.join(env.subst("$PROJECT_DIR"), "signing_key.pem")
 
-    # 1. Header vor dem Signieren aktualisieren/erstellen
-    generate_ota_header(key_path, header_path)
-
-    # 2. Signierung durchführen
     if not os.path.isfile(key_path):
-        print("[OTA SIGN] FEHLER: signing_key.pem fehlt!")
+        print("[OTA SIGN] FEHLER: signing_key.pem fehlt. "
+              "Erst 'python tools/gen_signing_key.py' ausfuehren.")
         sys.exit(1)
 
-    signed_path = firmware_path[:-4] + "-signed.bin"
-    
-    subprocess.run([
-        sys.executable, "-m", "espsecure", "sign_data", "--version", "2",
-        "--keyfile", key_path,
-        "--output", signed_path,
-        firmware_path,
-    ], check=True)
+    # 1. Originaldatei umbenennen (firmware.bin -> unsigned-firmware.bin)
+    os.replace(firmware_path, unsigned_path)
 
-    print(f"[OTA SIGN] OK: {os.path.basename(signed_path)}")
+    # 2. Signieren (liest unsigned, gibt unter originalem firmware.bin Pfad aus)
+    cmd = [
+        "espsecure", "sign_data", "--version", "2",
+        "--keyfile", key_path,
+        "--output", firmware_path,
+        unsigned_path,
+    ]
+
+    try:
+        subprocess.run(cmd, check=True, shell=True) # shell=True hilft Windows, .exe Dateien zu finden
+    except subprocess.CalledProcessError:
+        # Fallback: Falls 'espsecure' nicht im PATH, aber als Modul installierbar ist
+        subprocess.run([sys.executable, "-m", "espsecure"] + cmd[1:], check=True)
+
+    print(f"[OTA SIGN] OK: {os.path.basename(firmware_path)} "
+          f"({os.path.getsize(firmware_path)} Bytes, signiert)")
 
 env.AddPostAction("$BUILD_DIR/${PROGNAME}.bin", sign_firmware_sbv2)
