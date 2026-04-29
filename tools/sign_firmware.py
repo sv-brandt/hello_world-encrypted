@@ -56,7 +56,7 @@ def sign_firmware_sbv2(source, target, env):
     ]
 
     try:
-        subprocess.run(cmd, check=True, shell=True) # shell=True hilft Windows, .exe Dateien zu finden
+        subprocess.run(cmd, check=True)
     except subprocess.CalledProcessError:
         # Fallback: Falls 'espsecure' nicht im PATH, aber als Modul installierbar ist
         subprocess.run([sys.executable, "-m", "espsecure"] + cmd[1:], check=True)
