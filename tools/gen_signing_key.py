@@ -27,7 +27,7 @@ if os.path.exists(KEY):
 
 # 1. Key generieren
 subprocess.run(["espsecure", "generate_signing_key", "--version", "2",
-                "--scheme", "ecdsa256", KEY], check=True)
+                "--scheme", "rsa3072", KEY], check=True)
 
 # 2. Digest generieren
 subprocess.run(["espsecure", "digest_sbv2_public_key",
