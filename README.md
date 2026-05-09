@@ -88,7 +88,22 @@ Wird automatisch von PlatformIO nach jedem Build aufgerufen (`extra_scripts = po
 1. Prüft, ob `esptool` installiert ist; installiert es via `pip` falls nötig.
 2. Prüft, ob `signing_key.pem` im Projekt-Root vorhanden ist.
 3. Benennt `firmware.bin` um in `unsigned-firmware.bin`.
-4. Signiert `unsigned-firmware.bin` via `espsecure sign_data --version 2` und speichert das Ergebnis als `firmware.bin`.
+4. Signiert `unsigned-firmware.bin` mit folgendem Befehl und speichert das Ergebnis als `firmware.bin`:
+
+```bash
+espsecure sign_data \
+  --version 2 \
+  --keyfile signing_key.pem \
+  --output firmware.bin \
+  unsigned-firmware.bin
+```
+
+| Parameter | Bedeutung |
+|---|---|
+| `--version 2` | Secure Boot v2 (für ESP32-C6 erforderlich) |
+| `--keyfile` | Privater ECDSA-P256-Schlüssel |
+| `--output` | Ausgabedatei (signierte Firmware) |
+| (letztes Argument) | Eingabedatei (unsignierte Firmware) |
 
 | Datei | Inhalt |
 |---|---|
@@ -286,8 +301,133 @@ Erwartung: `Signature block 0 verification successful using the supplied key (EC
 
 ---
 
-## Wichtige Hinweise
+# Recherche zu Rollback und Arduino OTA (theoretisch, nicht getestet)
 
-- **Keine eFuses setzen** während der Testphase (`espefuse.py burn_efuse ...` nicht ausführen).
-- **Wegwerfschlüssel** in den Testordnern nicht in der Produktion verwenden.
-- **Für die Produktion:** eFuses und Secure Boot erst aktivieren, nachdem OTA, Signaturprüfung und Rollback vollständig validiert sind.
+[OTA Dokumentation Espressif](https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/system/ota.html)
+
+Dieses Wissen ist relevant für unser Provisioning-Projekt: Ein ESP-IDF-Projekt
+mit Secure Boot und Full Flash Encryption wird zuerst geflasht. Anschließend
+wird per OTA reiner Arduino-Code als neue Firmware geladen.
+
+---
+
+## Bedingungen für Rollback
+
+1. **Bootloader-Konfiguration im Provisioning-Projekt:**
+   `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y`
+   Diese Option wird beim Kompilieren des Bootloaders eingebrannt und kann
+   nachträglich (z.B. aus der Arduino-Firmware) **nicht** geändert werden.
+
+2. **Partitionstabelle muss enthalten:**
+   - `otadata` (Typ `data`, SubTyp `ota`)
+   - Mindestens zwei App-Slots (`ota_0` / `ota_1` bzw. `app0` / `app1`)
+
+3. **Validierungsaufruf in der Arduino-Firmware:**
+   Nach erfolgreichem Boot muss `esp_ota_mark_app_valid_cancel_rollback()`
+   aufgerufen werden – sonst rollt jede neue Firmware beim nächsten Reboot zurück.
+   Nötiger Include: `#include "esp_ota_ops.h"`
+
+---
+
+## Ablauf bei OTA-Update
+
+### Schreibphase (Arduino OTA)
+
+```
+Update.begin()          → esp_ota_begin()
+Update.write()          → esp_ota_write()           [n-mal]
+Update.end()            → esp_ota_end()
+                          esp_ota_set_boot_partition()
+                          → otadata: seq+1, PENDING_VERIFY
+ESP.restart()           → Reboot
+```
+
+### Bootphase – Fall A: Korrekt signierte, funktionierende Firmware
+
+```
+OTA abgeschlossen:
+  esp_ota_set_boot_partition() → schreibt NEW in otadata
+
+Bootloader liest otadata → NEW
+  → Secure Boot Check OK → App startet
+  → setup() läuft, esp_ota_mark_app_valid_cancel_rollback() wird aufgerufen
+  → otadata: VALID → dauerhaft aktiv
+```
+
+### Bootphase – Fall B: Falsch signierte Firmware (oder Korruption im Image)
+
+```
+OTA abgeschlossen:
+  esp_ota_set_boot_partition() → schreibt NEW in otadata
+
+Boot 1:
+  Bootloader liest NEW
+  → schreibt sofort PENDING_VERIFY in otadata
+  → Secure Boot Check FAIL → abort() → Reset
+
+Boot 2:
+  Bootloader liest PENDING_VERIFY
+  → "bereits versucht, nie bestätigt" → schreibt ABORTED
+  → wählt vorherigen Slot (app0)
+  → Secure Boot Check OK → alte Firmware läuft wieder
+```
+
+### Bootphase – Fall C: Korrekt signierte, aber crashende Firmware
+
+```
+OTA abgeschlossen:
+  esp_ota_set_boot_partition() → schreibt NEW in otadata
+
+Boot 1:
+  Bootloader liest NEW
+  → schreibt sofort PENDING_VERIFY in otadata
+  → Secure Boot Check OK → App startet
+  → Crash/Watchdog/Panic vor esp_ota_mark_app_valid_cancel_rollback()
+  → automatischer Reset
+
+Boot 2:
+  Bootloader liest PENDING_VERIFY
+  → "bereits versucht, nie bestätigt" → schreibt ABORTED
+  → wählt vorherigen Slot (app0)
+  → Secure Boot Check OK → alte Firmware läuft wieder
+```
+
+---
+
+## Mögliche Fallstricke
+
+| Fallstrick | Wirkung | Lösung |
+|---|---|---|
+| `esp_ota_mark_app_valid_cancel_rollback()` wird nie aufgerufen | Endlos-Rollback nach jedem OTA | Aufruf nach erfolgreicher Initialisierung in `setup()` |
+| `esp_ota_mark_app_valid_cancel_rollback()` wird zu früh aufgerufen | Defekte Firmware wird als valide markiert | Erst nach kritischen Initialisierungen aufrufen (WiFi, Backend-Verbindung) |
+| Bootloader ohne `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y` geflasht | Mechanismus inaktiv, keine Rollback-Reaktion | Bootloader aus Provisioning-Projekt mit korrekter sdkconfig neu kompilieren |
+| Bootloader von Arduino-/pioarduino-Default überschrieben; (In Produktion unmöglich, aber wichtig zu beachten während development) | Eigene Provisioning-Konfiguration verloren | OTA darf nur App-Slots schreiben, niemals Bootloader |
+| Nur ein App-Slot in Partitionstabelle | Kein Rollback-Ziel vorhanden | Partitionstabelle mit `ota_0`, `ota_1`, `otadata` |
+| Crash vor `esp_ota_mark_app_valid_cancel_rollback()` durch Watchdog | Beabsichtigt → führt zu Rollback | Korrektes Verhalten, nichts zu tun |
+
+---
+
+## Wichtige Befehle
+
+| Befehl | Framework | Nutzen | Anmerkung |
+|---|---|---|---|
+| `Update.begin/write/end()` | Arduino | OTA-Schreibvorgang | Wrapper für `esp_ota_*` |
+| `esp_ota_set_boot_partition()` | ESP-IDF | Setzt neuen Slot auf `PENDING_VERIFY` | Wird intern von `Update.end()` aufgerufen |
+| `esp_ota_mark_app_valid_cancel_rollback()` | ESP-IDF | Bestätigt Boot → State `VALID` | **Muss manuell aufgerufen werden** |
+| `esp_ota_mark_app_invalid_rollback_and_reboot()` | ESP-IDF | Erzwingt sofortigen Rollback | Z.B. wenn App selbst Defekt erkennt |
+| `esp_ota_get_state_partition()` | ESP-IDF | Liest aktuellen State eines Slots | Debug / Statusprüfung |
+| `esp_ota_get_running_partition()` | ESP-IDF | Liefert aktuell laufende Partition | Für Statusabfragen |
+
+---
+
+## Beispiel-Code für Arduino-Firmware
+
+```cpp
+#include "esp_ota_ops.h"
+
+void setup() {
+    // sobald klar ist das App Stabil läuft
+    esp_ota_mark_app_valid_cancel_rollback();
+    // Restlicher code
+}
+```
