@@ -432,7 +432,7 @@ Boot 2:
 #include "esp_ota_ops.h"
 
 void setup() {
-    // sobald klar ist das App Stabil läuft
+    // sobald klar ist, dass App Stabil läuft
     esp_ota_mark_app_valid_cancel_rollback();
     // Restlicher code
 }
