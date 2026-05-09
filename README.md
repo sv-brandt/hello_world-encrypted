@@ -301,6 +301,12 @@ Erwartung: `Signature block 0 verification successful using the supplied key (EC
 
 ---
 
+## Wichtige Hinweise
+
+- **Keine eFuses setzen** während der Testphase (`espefuse.py burn_efuse ...` nicht ausführen).
+- **Wegwerfschlüssel** in den Testordnern nicht in der Produktion verwenden.
+- **Für die Produktion:** eFuses und Secure Boot erst aktivieren, nachdem OTA, Signaturprüfung und Rollback vollständig validiert sind.
+
 # Recherche zu Rollback und Arduino OTA (theoretisch, nicht getestet)
 
 [OTA Dokumentation Espressif](https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/system/ota.html)
