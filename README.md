@@ -59,7 +59,7 @@ Erzeugt zwei Dateien im Projekt-Root:
 
 #### Private Key, Public Key und Digest
 
-`signing_key.pem` enthält im PEM-Format sowohl den privaten als auch den öffentlichen Schlüssel. Das ist bei ECDSA-Schlüsseln Standard: Der Public Key ist der aus dem Private Key mathematisch abgeleitete Punkt auf der elliptischen Kurve (`public = private × G`) und wird zur Vereinfachung in derselben Datei gespeichert.
+`signing_key.pem` enthält im PEM-Format sowohl den privaten als auch den öffentlichen Schlüssel. Bei **ECDSA-P256** ist der Public Key der aus dem Private Key abgeleitete Punkt auf der elliptischen Kurve (`public = private × G`). Bei **RSA-3072** enthält die PEM-Datei Modulus, öffentlichen und privaten Exponenten sowie die CRT-Parameter (`n, e, d, p, q, ...`). In beiden Fällen ist es Standard, beide Keys in derselben Datei zu speichern.
 
 Den Public Key separat exportieren:
 
@@ -67,11 +67,11 @@ Den Public Key separat exportieren:
 espsecure.py extract_public_key --version 2 --keyfile signing_key.pem public_key.pem
 ```
 
-`public_key.pem` enthält den EC-Public-Key (P-256) im PEM-Format und kann ohne Sicherheitsbedenken weitergegeben werden — der Private Key lässt sich daraus nicht ableiten.
+`public_key.pem` enthält den Public Key im PEM-Format (EC-P256 bei ECDSA, RSA bei RSA-3072) und kann ohne Sicherheitsbedenken weitergegeben werden — der Private Key lässt sich daraus nicht ableiten.
 
 | | `public_key.pem` | `signing_key_digest.bin` |
 |---|---|---|
-| Inhalt | EC-Public-Key (P-256), PEM-Format | SHA-256-Hash des Public Keys, 32 Byte binär |
+| Inhalt | Public Key, PEM-Format (algorithmusabhängig) | SHA-256-Hash des Public Keys, 32 Byte binär |
 | Verwendung | Host-seitige Signaturprüfung | eFuse-Brennung (Produktion) |
 
 **Warum wir nur den Digest brauchen:** Der ESP32-Bootloader speichert im eFuse nicht den vollständigen Public Key, sondern nur dessen 32-Byte-SHA-256-Hash. Beim Booten extrahiert er den Public Key aus dem Signatur-Block der Firmware, hasht ihn und vergleicht mit dem eFuse-Wert. Der Public Key steckt also bereits in der signierten `firmware.bin` — er muss dem Gerät nie separat übergeben werden.
@@ -101,7 +101,7 @@ espsecure sign_data \
 | Parameter | Bedeutung |
 |---|---|
 | `--version 2` | Secure Boot v2 (für ESP32-C6 erforderlich) |
-| `--keyfile` | Privater ECDSA-P256-Schlüssel |
+| `--keyfile` | Privater Schlüssel (ECDSA-P256 oder RSA-3072 — Algorithmus wird automatisch aus dem Key erkannt) |
 | `--output` | Ausgabedatei (signierte Firmware) |
 | (letztes Argument) | Eingabedatei (unsignierte Firmware) |
 
@@ -111,6 +111,48 @@ espsecure sign_data \
 | `firmware.bin` | Signierte Firmware (Secure Boot v2 kompatibel) |
 
 Bei fehlendem `espsecure` im PATH greift ein Fallback auf `python -m espsecure`.
+
+---
+
+## Algorithmus wechseln: ECDSA-256 ↔ RSA-3072
+
+Secure Boot v2 unterstützt auf dem ESP32-C6 beide Algorithmen. Der Wechsel ist fast vollständig transparent: `sign_data`, `verify_signature`, `extract_public_key` und `digest_sbv2_public_key` erkennen den Algorithmus **automatisch aus dem Schlüsseltyp** — kein `--scheme`-Flag nötig. Nur `generate_signing_key` erwartet eine explizite Angabe.
+
+### Was sich ändert
+
+Einzige Codeänderung: `tools/gen_signing_key.py`, Zeile 41 — `ecdsa256` durch `rsa3072` ersetzen:
+
+```python
+# ECDSA-P256 (Standard)
+run_espsecure(["generate_signing_key", "--version", "2",
+               "--scheme", "ecdsa256", KEY])
+
+# RSA-3072
+run_espsecure(["generate_signing_key", "--version", "2",
+               "--scheme", "rsa3072", KEY])
+```
+
+`sign_firmware.py` und alle anderen `espsecure`-Befehle bleiben **unverändert**.
+
+### Wechsel-Vorgang
+
+1. Vorhandenen Schlüssel löschen (das Skript bricht sonst ab):
+   ```powershell
+   del signing_key.pem, signing_key_digest.bin
+   ```
+2. `tools/gen_signing_key.py` Zeile 41 anpassen (s. o.).
+3. Neuen Schlüssel erzeugen:
+   ```bash
+   python tools/gen_signing_key.py
+   ```
+4. Firmware neu bauen — PlatformIO signiert automatisch mit dem neuen Schlüssel.
+5. Vorhandene Test-Binaries wurden mit dem alten Schlüssel signiert und verifizieren gegen den neuen Key nicht mehr. Für neue Testfälle müssen sie neu signiert werden.
+
+### Digest-Format
+
+`signing_key_digest.bin` ist für beide Algorithmen identisch aufgebaut: SHA-256-Hash des Public Keys, 32 Byte. `digest_sbv2_public_key` erkennt den Schlüsseltyp automatisch.
+
+> **In der Produktion (eFuse aktiv):** Das Algorithmus-Bit wird beim ersten Secure-Boot-Bootloader-Flash in die eFuse gebrannt und ist **irreversibel**. Ein Algorithmenwechsel nach eFuse-Brennung ist ohne neues Gerät nicht möglich. In der aktuellen Testphase (keine eFuses gesetzt) kann der Algorithmus frei gewechselt werden.
 
 ---
 
