@@ -78,6 +78,27 @@ espsecure.py extract_public_key --version 2 --keyfile signing_key.pem public_key
 
 In unserer Testumgebung (ohne eFuse) entfällt dieser Vergleich vollständig. `verify_signature` auf dem Host arbeitet direkt mit `signing_key.pem`. (Wir haben auch eine Ota_verify Klasse im Gateway Projekt, welche dies kann, vorraussichtlich werden wir diese aber aufgrund ihrer Komplexität verwerfen.)
 
+#### eFuse-Brennung (Produktion — irreversibel)
+
+> **Achtung:** Dieser Befehl ist **irreversibel**. Erst ausführen, wenn OTA, Signaturprüfung und Rollback vollständig validiert sind.
+
+```bash
+espefuse.py --port <PORT> burn_key BLOCK_KEY0 signing_key_digest.bin SECURE_BOOT_DIGEST0
+```
+
+| Parameter | Bedeutung |
+|---|---|
+| `--port <PORT>` | Serieller Port des Geräts (z. B. `COM3` unter Windows, `/dev/ttyUSB0` unter Linux) |
+| `BLOCK_KEY0` | Erster eFuse-Schlüsselblock (für den zweiten Key: `BLOCK_KEY1`) |
+| `signing_key_digest.bin` | 32-Byte-SHA-256-Digest des Public Keys — erzeugt von `gen_signing_key.py` |
+| `SECURE_BOOT_DIGEST0` | Key-Purpose: markiert den Block als Secure-Boot-v2-Digest (passend zu `BLOCK_KEY0`) |
+
+Für einen zweiten Schlüssel (Key-Rotation mit Zwischenversion):
+
+```bash
+espefuse.py --port <PORT> burn_key BLOCK_KEY1 signing_key_digest_new.bin SECURE_BOOT_DIGEST1
+```
+
 ---
 
 ### `tools/sign_firmware.py` — Post-Build-Signierschritt
